@@ -1,4 +1,4 @@
-#Aeternity Oracle#
+# Aeternity Oracle
 
 This is a sample Oracle to fetch live pricefeed and other metadata associated with a cryptocurrency using coingecko APIs.
 
