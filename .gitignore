@@ -1,0 +1,8 @@
+node_modules
+build
+Architecture/Arch_1.mdj
+backend/src/user/node_modules
+sampleCalc.js
+contracts/OraclesManager.aes
+contracts/ExampleContract.aes
+contracts/CalicoDEX copy.aes

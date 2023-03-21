@@ -1,0 +1,742 @@
+@compiler >= 6
+
+include "List.aes"
+include "Option.aes"
+include "String.aes"
+include "core/utils.aes"
+include "core/interfaces.aes"
+
+// MintableBurnableNFT implements the mintable and burnable extension.
+payable contract CalicoDEX =
+    // Events.
+    // Transfer(from, to, _tokenId)
+    // Approval(owner, approved, _tokenId, enabled)
+    // ApprovalForAll(owner, operator, enabled)
+    datatype event 
+        = Transfer(address, address, string)
+        | Approval(address, address, string)
+        | ApprovalForAll(address, address, string)
+        | HTLCERC721New(string, indexed address, address) 
+        | HTLCERC721New1(int, string, bytes(32))
+        | HTLCERC721Withdraw( string) 
+        | HTLCERC721Refund(string)
+        | Bid(address, int)
+        | BidWithdrawal(address, int)
+        | BidCanceled(string)
+
+    // Metadata has a type and value.
+    //
+    // Types:
+    //
+    // URL is any url except IPFS.
+    // IPFS is an IPFS ID.
+    // OBJECT_ID is a unique identifier for a physical 
+    // object (car's VIN number, real estate cadastral code, etc)
+    // MAP is for other key/value based properties. 
+    //
+    // Values:
+    // URL, IPFD, OBJECT_ID: string
+    // MAP: map(string, string)
+    datatype metadata_type = URL | IPFS | OBJECT_ID | MAP
+    datatype metadata = String(string) | Map(string, string)
+
+    record lockContract = {
+            sender      : address,
+            receiver    : address,
+            tokenId     : string,
+            hashlock    : bytes(32),
+            timelock    : int,
+            withdrawn   : bool,
+            refunded    : bool,
+            preimage    : bytes(32)}
+
+    record currencyMetadata = {
+            symbol                              : string,
+            name                                : string,
+            last_updated                        : string,
+            current_price                       : string,
+            market_cap                          : string,
+            fully_diluted_valuation             : string,
+            total_volume                        : string,
+            high_24h                            : string,
+            low_24h                             : string,
+            price_change_24h                    : string,
+            price_change_percentage_24h         : string,
+            market_cap_change_24h               : string,
+            market_cap_change_percentage_24h    : string,
+            circulating_supply                  : string,
+            total_supply                        : string,
+            max_supply                          : string}
+    
+    record bid = {
+            bidOwner            : address,
+            bid_start_time      : int,
+            bid_end_time        : int,
+            bid_canceled        : bool,
+            highest_bidder      : address,
+            funds_by_bidder     : map(address, int)}
+
+    record meta_info = { 
+            name                : string,
+            symbol              : string,
+            metadata_type       : metadata_type,
+            base_url            : option(string),
+            currencyMetadata    : currencyMetadata,
+            riskFactor          : string}
+    
+    record state = {
+            owner                   : map(string, address),
+            meta_info               : map(string, meta_info),
+            nftMap                  : map(string, map(string, string)),
+            owners                  : map(string, address),
+            balances                : map(address, int),
+            approvals               : map(string, address),
+            operators               : map(address, map(address, bool)),
+            metadata                : map(string, metadata),
+            counter                 : int,
+            assetNFTList            : map(string, string),
+            endorsements            : map(string, map(address, int)),
+            contracts               : map(string, lockContract),
+            bids                    : map(string, bid)}
+    
+    entrypoint init() = 
+        { contracts = {}, counter = 0, nftMap={}, owners = {}, balances = {}, approvals = {}, operators = {}, metadata = {}, meta_info = {}, owner = {}, bids = {}, assetNFTList = {}, endorsements={}}
+        
+    stateful entrypoint mintAssetNFT(name: string, symbol: string, metadata_type: metadata_type, base_url: option(string), ownerAddress: address, metadata: option(metadata), data: option(string), currencyMetadata: currencyMetadata) : string =
+        require(String.length(name) >= 1, "STRING_TOO_SHORT_NAME")
+        require(String.length(name) >= 1, "STRING_TOO_SHORT_SYMBOL")
+        let _tokenId : string = generateTokenId(name, symbol, ownerAddress, Chain.timestamp)
+
+        put( state { owner[_tokenId] = ownerAddress, meta_info[_tokenId] = { name = name, symbol = symbol, metadata_type = metadata_type, base_url = base_url, currencyMetadata = currencyMetadata, riskFactor = "0"}})
+                
+        switch(metadata)
+            None =>
+                put( state { balances[state.owner[_tokenId] = 0] @ b = b + 1, owners[_tokenId] = state.owner[_tokenId], assetNFTList[_tokenId] = symbol } ) 
+            Some(v) => 
+                put( state { balances[state.owner[_tokenId] = 0] @ b = b + 1, owners[_tokenId] = state.owner[_tokenId], metadata[_tokenId] = v, assetNFTList[_tokenId] = symbol } )
+
+        // approve(Contract.address, _tokenId, true)
+        switch(invoke_nft_receiver(Contract.address, ownerAddress, data))
+            // owner address is a contract and invocation failed.
+            (true, false) => abort("SAFE_MINT_FAILED")
+            _ => Chain.event(Transfer(Contract.address, ownerAddress, _tokenId))
+
+        _tokenId
+
+    // Issues a new token to the provided address. If the owner is a contract, NFTReceiver will be called 
+    // with data if provided.
+    //
+    // Throws if the call to NFTReceiver implementation failed (safe transfer).
+    // 
+    // Emits a Transfer event.
+    stateful entrypoint mintRiskNFT(name: string, symbol: string, metadata_type: metadata_type, base_url: option(string), ownerAddress: address, metadata: option(metadata), data: option(string), assetNFTId: string, currencyMetadata: currencyMetadata, riskFactor: string) : string =
+        requireTokenOwner(assetNFTId)
+        require(String.length(name) >= 1, "STRING_TOO_SHORT_NAME")
+        require(String.length(name) >= 1, "STRING_TOO_SHORT_SYMBOL")
+        
+        let _tokenId : string = generateSecondaryTokenId(name, symbol, ownerAddress, Chain.timestamp, assetNFTId)
+
+        put( state { owner[_tokenId] = ownerAddress, meta_info[_tokenId] = { name = name, symbol = symbol, metadata_type = metadata_type, base_url = base_url, currencyMetadata = currencyMetadata, riskFactor = riskFactor}})
+        
+        switch(metadata)
+            None =>
+                put( state { balances[state.owner[_tokenId] = 0] @ b = b + 1, owners[_tokenId] = state.owner[_tokenId], nftMap[assetNFTId = {}][_tokenId] = symbol }) 
+            Some(v) => 
+                put( state { balances[state.owner[_tokenId] = 0] @ b = b + 1, owners[_tokenId] = state.owner[_tokenId], metadata[_tokenId] = v, nftMap[assetNFTId = {}][_tokenId] = symbol})
+        
+        switch(invoke_nft_receiver(Contract.address, ownerAddress, data))
+            // owner address is a contract and invocation failed.
+            (true, false) => abort("SAFE_MINT_FAILED")
+            _ => Chain.event(Transfer(Contract.address, ownerAddress, _tokenId))
+        
+        _tokenId
+    
+    // This function is used to update the riskFactor for a Risk NFT before it can be used to auction again by new-owner or current owner.
+    stateful entrypoint updateRiskNFTRiskFactor(_riskNFTTokenId : string, currencyMetadata: currencyMetadata, riskFactor: string) : bool =
+        let _ownerResult = switch(owner(_riskNFTTokenId))
+            None => abort("INVALID_TOKEN_ID")
+            Some(v) => v
+
+        require(_ownerResult == Call.caller, "only Owner of RISK NFT can make this update")
+        let _meta_info : meta_info = {
+            name                = state.meta_info[_riskNFTTokenId].name,
+            symbol              = state.meta_info[_riskNFTTokenId].symbol,
+            metadata_type       = state.meta_info[_riskNFTTokenId].metadata_type,
+            base_url            = state.meta_info[_riskNFTTokenId].base_url,
+            currencyMetadata    = currencyMetadata,
+            riskFactor          = riskFactor}
+
+        put(state{ meta_info[_riskNFTTokenId] = _meta_info })
+        // put(state{ contracts[_contractId] = _lockContract })
+        true
+
+    
+    // A function for users to endorse a skill. Each endorsement is of value 1.
+    stateful entrypoint endorseAssetNFT(_tokenId : string) : unit = 
+        // Owner of the token cannot endorse their own skills
+        requireNotTokenOwner(_tokenId)
+        require(checkIfAssetNFT(_tokenId) == true, "You cannot endorse this NFT as this is not a asset NFT")
+        require(checkIfAlreadyEndorsed(_tokenId) == false, "Already Endorsed. You cannot re-endorse this NFT")
+
+        put( state { endorsements[_tokenId = {}][Call.caller] = Chain.timestamp })
+
+    entrypoint checkIfAlreadyEndorsed(_tokenId: string) : bool = 
+        if(Map.member(_tokenId, state.endorsements))
+            Map.member(Call.caller, state.endorsements[_tokenId])
+        else
+            // If _tokenId is not part of endorsement, it means it hasn't been endorsed yet.
+            false
+        
+
+    // Gets the corresponding Secondary NFT linked to a given asset skill. 
+    //
+    entrypoint getSecondaryNFTs(_parentNFTTokenId : string) : option(map(string, string)) =
+        Map.lookup(_parentNFTTokenId, state.nftMap)
+
+    
+    entrypoint getFunds(_tokenId : string) : option(bid) =
+        Map.lookup(_tokenId, state.bids)
+    
+    entrypoint getAssetNFTs(_tokenId : string) : map(string,string) =
+        state.assetNFTList
+
+    entrypoint getEndorsements(_tokenId : string) : map(string, map(address, int)) =
+        state.endorsements
+
+    entrypoint checkIfAssetNFT(_tokenId : string) : bool =
+        Map.member(_tokenId, state.assetNFTList)
+
+    // Burns the token of the provided token id from Call.caller. 
+    // Emits the Transfer event.
+    // stateful entrypoint burn(_tokenId: bytes(32)) : unit =
+    //     require_authorized(_tokenId)
+
+    //     let owner = switch(state.owners[_tokenId])
+    //         None => abort("INVALID_TOKEN_ID")
+    //         Some(v) => v
+
+    //     put( state { balances[owner[_tokenId]] @ b = b - 1, owners = Map.delete(_tokenId, state.owners), metadata = Map.delete(_tokenId, state.metadata) } )
+    //     Chain.event(Transfer(owner[_tokenId], Contract.address, _tokenId))
+
+    // Returns a hardcoded list of all implemented extensions on the deployed contract.
+    entrypoint aex141_extensions() : list(string) =
+        ["mintable", "burnable"]
+
+    // Returns meta information associated with the token contract.
+    entrypoint meta_info(_tokenId: string) : meta_info = 
+        state.meta_info[_tokenId]
+
+    // Returns meta data associated with a token. 
+    entrypoint metadata(_tokenId: string) : option(metadata) = 
+        switch(Map.lookup(_tokenId, state.metadata))
+            None => None
+            Some(v) =>
+                if(state.meta_info[_tokenId].metadata_type == URL)
+                    // We have URL as the metadata type,
+                    // if no base_url is set we return the metadata as it is,
+                    // if a base_url is set we concatenate the metadata with the base url.
+                    switch(state.meta_info[_tokenId].base_url)
+                        None =>
+                            Some(v)
+                        Some(base_url) =>
+                            switch(v)
+                                String(s) =>
+                                    Some(String(String.concats([base_url, s])))
+                else
+                    // Not an URL, so return the metadata as it is.
+                    Some(v)
+
+    // Returns the balance of an account with address owner, if the account exists. 
+    // If the owner address is unknown to the contract None will be returned. Using option type 
+    // as a return value allows us to determine if the account has balance of 0, more than 0, 
+    // or the account has never had balance and is still unknown to the contract.
+    entrypoint balance(owner: address) : option(int) =
+        Map.lookup(owner, state.balances)
+
+    // Returns the owner's address for the provided token, if the token is minted. 
+    // If the token isn't minted None will be returned.
+    entrypoint owner(_tokenId: string) : option(address) =
+        Map.lookup(_tokenId, state.owners)
+
+    private function requireTokenOwner(_tokenId : string) : unit =
+        require(Call.caller == state.owner[_tokenId], "Only token owner allowed")
+    
+    private function requireNotTokenOwner(_tokenId : string) : unit =
+        require(Call.caller != state.owner[_tokenId], "Owner not allowed")
+
+    // Transfers token from the from address to the to address. Will invoke NFTReceiver if to is a contract receiver. 
+    // If provided data will be submitted with the invocation of NFTReceiver.
+    //
+    // Throws if:
+    // - Call.caller is not the current owner, an authorized operator or the approved address for this token;
+    // - from isn't the current owner;
+    // - token isn't a valid token;
+    // - the invocation of NFTReceiver fails.
+    //
+    // Emits the Transfer event.
+    stateful entrypoint transfer(from: address, to: address, _tokenId: string, data: option(string)) : unit =
+        // require_authorized(_tokenId)
+        require_token_owner(_tokenId, from)
+        
+        remove_approval(_tokenId)
+        put( state { balances[from] @b = b - 1, balances[to = 0] @nb = nb + 1, owners[_tokenId] = to, owner[_tokenId] = to } )
+        switch(invoke_nft_receiver(from, to, data))
+            // to address is a contract and invocation failed.
+            (true, false) => abort("SAFE_TRANSFER_FAILED")
+            _ => Chain.event(Transfer(from, to, _tokenId))
+
+    // Sets the approved address to interact on behalf of an owner for the token. 
+    // If enabled is true the operator is approved, if false the approval is revoked. 
+    //
+    // Throws unless caller is the current NFT owner, or an authorized operator of the current owner. 
+    //
+    // Emits the Approval event.
+    stateful entrypoint approve(approved: address, _tokenId: string, enabled: bool) : unit =
+        require_authorized(_tokenId)
+
+        if(enabled)
+            put( state { approvals[_tokenId] = approved })
+        else
+            remove_approval(_tokenId)
+        Chain.event(Approval(state.owners[_tokenId], approved, _tokenId))
+
+
+    // Enables or disables approval for an operator to manage all of the caller's assets. 
+    // If enabled is true the operator is approved, if false the approval is revoked. 
+    //
+    // Emits the ApprovalForAll event.
+    stateful entrypoint approve_all(operator: address, enabled: bool) : unit =
+        put( state { operators = { [Call.caller] = { [operator] = enabled }} } )
+        Chain.event(ApprovalForAll(Call.caller, operator, Utils.bool_to_string(enabled)))
+
+    // Returns the address approved to interact with the token or returns None 
+    // if no approval has been set. 
+    entrypoint get_approved(_tokenId: string) : option(address) =
+        Map.lookup(_tokenId, state.approvals)
+
+    // Returns true if a is approved to transact for the token.
+    entrypoint is_approved(_tokenId: string, a: address) : bool =
+        switch(Map.lookup(_tokenId, state.approvals))
+            None => false
+            Some(o) => o == a
+
+    // Returns true if operator is approved to commit transactions on behalf of owner.
+    // Indicates wether an address is an authorized operator for another address.
+    entrypoint is_approved_for_all(owner: address, operator: address) : bool =
+        switch(Map.lookup(owner, state.operators))
+            None => false
+            Some(ops) =>
+                switch(Map.lookup(operator, ops))
+                    None => false
+                    Some(v) => v
+
+    // Helper functions
+
+    // Returns true if a is the owner of the token with _tokenId.
+    private function is_token_owner(_tokenId: string, a: address) : bool =
+        switch(Map.lookup(_tokenId, state.owners))
+            None => false
+            Some(o) => o == a
+
+    // Throws if the caller is not the contract's owners.
+    // private function requireTokenOwner() : unit =
+    //     require(Call.caller == state.owner, "ONLY_CONTRACT_OWNER_CALL_ALLOWED")
+
+    // Throws if a is not the token's owner.
+    private function require_token_owner(_tokenId: string, a: address) : unit =
+        require(is_token_owner(_tokenId, a), "ONLY_OWNER_CALL_ALLOWED")
+
+    // Throws if the caller is not the token's owner or an operator.
+    private function require_token_owner_or_operator(_tokenId: string) : unit =
+        let owner = switch(owner(_tokenId))
+            None => abort("INVALID_TOKEN_ID")
+            Some(v) => v
+        require(Call.caller == owner || is_approved_for_all(owner, Call.caller), "ONLY_OWNER_OR_OPERATOR_CALL_ALLOWED")
+
+    // Throws if the caller is not the token's owner, approved or operator.
+    private function require_authorized(_tokenId: string) : unit =
+        let owner = switch(owner(_tokenId))
+            None => abort("INVALID_TOKEN_ID")
+            Some(v) => v
+        require(Call.caller == state.owner[_tokenId] || is_approved(_tokenId, Call.caller) || is_approved_for_all(state.owner[_tokenId], Call.caller), "ONLY_OWNER_APPROVED_OR_OPERATOR_CALL_ALLOWED")
+
+    // Helper function to remove an approval from the map.
+    private stateful function remove_approval(_tokenId: string) : unit =
+        if(Map.member(_tokenId, state.approvals))
+            put( state { approvals = Map.delete(_tokenId, state.approvals)})
+    
+    // Helper function for safe transfers.
+    // Returns a pair of bool (is_contract, success).
+    private function invoke_nft_receiver(from: address, to: address, data: option(string)) : (bool * bool) =
+        if(Address.is_contract(to))
+            switch(data)
+                None => (true, false)
+                Some(_) => (true, true)
+
+        else
+            // The address is NOT a contract.
+            (false, false)
+
+    function tokensTransferable(_tokenId : string) : bool =
+        // ensure this contract is approved to transfer the designated token
+        // so that it is able to honor the claim request later
+        require(is_approved(_tokenId, Contract.address) == true, "The HTLC contract must have been designated as an approved spender for the token")
+        true
+
+    function futureTimelock(_time : int) : bool = 
+        // only requirement is the timelock time is after the last blocktime (now).
+        // probably want something a bit further in the future then this.
+        // but this is still a useful sanity check:
+        require(_time > Chain.timestamp, "timelock time must be in the future")
+        true
+        
+    function contractExists(_contractId : string) : bool = 
+        require(haveContract(_contractId), "contractId does not exist")
+        true
+        
+    function hashlockMatches(_contractId : string, _x: bytes(32)) : bool =
+        require(state.contracts[_contractId].hashlock == Crypto.sha256(_x),"hashlockMatches: hashlock hash does not match")
+        true
+        
+    function withdrawable(_contractId: string) : bool =
+        require(state.contracts[_contractId].receiver == Call.caller, "withdrawable: not receiver")
+        require(state.contracts[_contractId].withdrawn == false, "withdrawable: already withdrawn")
+        require(state.contracts[_contractId].timelock > Chain.timestamp, "withdrawable: timelock time must be in the future")
+        true
+
+    function refundable(_contractId : string) : bool =
+        require(state.contracts[_contractId].sender == Call.caller, "refundable: not sender")
+        require(state.contracts[_contractId].refunded == false, "refundable: already refunded")
+        require(state.contracts[_contractId].withdrawn == false, "refundable: already withdrawn")
+        // require(state.contracts[_contractId].timelock =< Chain.timestamp, "refundable: timelock not yet passed")
+        true
+        
+    function generate_id(sender : address, receiver : address, hash_lock : hash, expiration : int, _tokenId : string) : string =
+        let packed_string : string = String.concats([Address.to_str(sender),Address.to_str(receiver),Bytes.to_str(hash_lock),Int.to_str(expiration),_tokenId])
+        //  Crypto.sha256(packed_string)
+        packed_string
+
+    function generateTokenId(name : string, symbol : string, sender : address, currentTime : int) : string =
+        let packed_string : string = String.concats([name, symbol, Address.to_str(sender),Int.to_str(currentTime)])     
+        Bytes.to_str(Crypto.sha256(packed_string))
+        // packed_string
+    
+    function generateSecondaryTokenId(name : string, symbol : string, sender : address, currentTime : int, _assetNFTID : string) : string =
+        let packed_string : string = String.concats([name, symbol, Address.to_str(sender),Int.to_str(currentTime), _assetNFTID])
+        Bytes.to_str(Crypto.sha256(packed_string))
+
+    function haveContract(_contractId : string) : bool =
+        if(Map.size(state.contracts) == 0)
+            false
+        else
+            Map.member(_contractId, state.contracts)
+    
+     /**
+     * @dev Sender / Payer sets up a new hash time lock contract depositing the
+     * funds and providing the reciever and terms.
+     *
+     * NOTE: _receiver must first call approve() on the token contract. 
+     *       See isApprovedOrOwner check in tokensTransferable modifier.
+     * @param _receiver Receiver of the tokens.
+     * @param _hashlock A sha-2 sha256 hash hashlock.
+     * @param _timelock UNIX epoch seconds time that the lock expires at. 
+     *                  Refunds can be made after this time.
+     * @param _tokenContract ERC20 Token contract address.
+     * @param _tokenId Id of the token to lock up.
+     * @return contractId Id of the new HTLC. This is needed for subsequent 
+     *                    calls.
+     */
+    public payable stateful entrypoint newContract(_receiver : address, _hashlock : bytes(32), _timelock : int, _tokenId : string, _preImage: bytes(32), data: option(string)) : string = 
+        // only requirement is the timelock time is after the last blocktime (now).
+        // probably want something a bit further in the future then this.
+        // but this is still a useful sanity check:
+        // tokensTransferable(_tokenId)
+        requireTokenOwner(_tokenId)
+        futureTimelock(_timelock)
+        
+        let contractId : string = Bytes.to_str(Crypto.sha256(generate_id(Call.caller, _receiver, _hashlock, _timelock, _tokenId)))
+        
+        // Have contract
+        if(haveContract(contractId))
+            abort("Contract with same parameter exists")
+
+        // This contract becomes the temporary owner of the token
+        transfer(Call.caller, Contract.address, _tokenId, data)
+        
+        let _lockContract : lockContract = { 
+            sender = Call.caller,
+            receiver = _receiver,
+            tokenId = _tokenId,
+            hashlock = Crypto.sha256(_hashlock),
+            timelock = _timelock,
+            withdrawn = false,
+            refunded = false,
+            preimage = Crypto.sha256(_preImage)
+            }
+        
+        put(state{ contracts[contractId] = _lockContract })
+
+        Chain.event(HTLCERC721New(contractId, Call.caller, _receiver))
+        Chain.event(HTLCERC721New1(_timelock, _tokenId, _hashlock))
+
+        contractId
+
+    /**
+     * @dev Called by the sender if there was no withdraw AND the time lock has
+     * expired. This will restore ownership of the tokens to the sender.
+     *
+     * @param _contractId Id of HTLC to refund from.
+     * @return bool true on success
+     */
+    public stateful entrypoint refund(_contractId: string, data: option(string)) : bool =
+        contractExists(_contractId)
+        refundable(_contractId)
+        let _lockContract : lockContract = { 
+             sender = state.contracts[_contractId].sender,
+            receiver = state.contracts[_contractId].receiver,
+            tokenId = state.contracts[_contractId].tokenId,
+            hashlock = state.contracts[_contractId].hashlock,
+            timelock = state.contracts[_contractId].timelock,
+            withdrawn = state.contracts[_contractId].withdrawn,
+            refunded = true,
+            preimage = state.contracts[_contractId].preimage
+            }
+
+        put(state{ contracts[_contractId] = _lockContract })
+        transfer(Contract.address, _lockContract.sender, _lockContract.tokenId, data)
+            
+        Chain.event(HTLCERC721Refund(_contractId))
+        true
+
+    /**
+     * @dev Get contract details.
+     * @param _contractId HTLC contract id
+     * @return All parameters in struct LockContract for _contractId HTLC
+     */
+    public stateful entrypoint getContract(_contractId : string) : lockContract = 
+        if(haveContract(_contractId) == true)
+            state.contracts[_contractId]
+        else
+            abort("Contract not found!")
+        
+     /**
+    * @dev Called by the receiver once they know the preimage of the hashlock.
+    * This will transfer ownership of the locked tokens to their address.
+    *
+    * @param _contractId Id of the HTLC.
+    * @param _preimage sha256(_preimage) should equal the contract hashlock.
+    * @return bool true on success
+     */
+    public stateful entrypoint withdraw(_contractId : string, _hashlock : bytes(32), _preimage : bytes(32), data: option(string)) : bool =
+        contractExists(_contractId)
+        hashlockMatches(_contractId, _hashlock)
+        withdrawable(_contractId)
+        
+        let _lockContract : lockContract = { 
+            sender = state.contracts[_contractId].sender,
+            receiver = state.contracts[_contractId].receiver,
+            tokenId = state.contracts[_contractId].tokenId,
+            hashlock = state.contracts[_contractId].hashlock,
+            timelock = state.contracts[_contractId].timelock,
+            withdrawn = true,
+            refunded = state.contracts[_contractId].refunded,
+            preimage = _preimage
+            }
+        
+        transfer(Contract.address, _lockContract.receiver, _lockContract.tokenId, data)
+        put(state{ contracts[_contractId] = _lockContract })
+        Chain.event(HTLCERC721Withdraw(_contractId))
+        true
+
+    // This function finalizes the existing bid
+    stateful payable entrypoint finalizeBid(_tokenId: string, data: option(string)) : unit =
+        only_owner(_tokenId)
+        // only_ended_or_canceled(_tokenId) // TO-DO = re-enable this line after testing
+        let _bid : bid = state.bids[_tokenId]
+        let _funds_by_bidder : map(address, int) = _bid.funds_by_bidder
+        
+        // transfer the amount to the owner of Derivative NFT.
+        Chain.spend(_bid.bidOwner, _bid.funds_by_bidder[_bid.highest_bidder])
+        // transfer the ownership of the derivative NFT from contract to the new Owner who is the highest bidder.
+        transfer(Contract.address, _bid.highest_bidder, _tokenId, data)
+
+    entrypoint getFundsByBidder(_tokenId : string) : map(address, int) =
+        let _bid : bid = state.bids[_tokenId]
+        _bid.funds_by_bidder
+
+    entrypoint getBid(_tokenId : string) : bid =
+        state.bids[_tokenId]
+    /*
+    * @dev - Initializing function / constructor
+    * @param _start_block : int - the number of the auction starting block
+    * @param _end_block : int - the number of the auction ending block
+    */
+    public stateful entrypoint startBid(_tokenId: string, _endTime: int, data: option(string)) : bool =
+        require(checkIfAssetNFT(_tokenId) == false, "Cannot trade asset NFT")
+        require(_endTime > Chain.timestamp, "End time must be in the future")
+        require(is_token_owner(_tokenId, Call.caller), "Only Owner of the token can start a bid")
+
+        let _bid : bid = {
+            bidOwner            = Call.caller,
+            bid_start_time      = Chain.timestamp,
+            bid_end_time        = _endTime,
+            bid_canceled        = false,
+            highest_bidder      = Call.caller,
+            funds_by_bidder     = {[Call.caller] = 1}}
+
+        put( state { bids[_tokenId] = _bid })
+        
+        transfer(Call.caller, Contract.address, _tokenId, data)
+        true
+
+    /*
+    * @dev - Function to place bid in the auction
+    */
+    stateful payable entrypoint placeBid(_tokenId : string) : bool =
+        only_after_start(_tokenId)
+        only_before_end(_tokenId)
+        only_not_canceled(_tokenId)
+        only_not_owner(_tokenId)
+        
+        // reject transactions without value
+        require(Call.value > 0, "Please provide more than 0 AEs.")
+
+        // calculate the user's total bid based on the current amount they've sent to the contract
+        // plus whatever has been sent with this transaction
+        
+        let _bid : bid = state.bids[_tokenId]
+
+        let existingBidValue : int = 
+            switch(Map.lookup(Call.caller, _bid.funds_by_bidder))
+                None => 0
+                Some(bidValue) => bidValue
+        
+        let new_bid = existingBidValue + Call.value
+        
+        // get the current highest bid
+        let last_highest_bid = _bid.funds_by_bidder[_bid.highest_bidder]
+            
+        // if the user isn't even willing to overbid the highest bid, there's nothing for us
+        // to do except revert the transaction.
+        require(new_bid > last_highest_bid, "The provided amount is not enough for overbid.")
+        
+        // Transferring the bid amount into the contract
+        transferAmountToContract()
+
+        put(state{ bids[_tokenId].funds_by_bidder[Call.caller] = new_bid })
+        put(state{ bids[_tokenId].highest_bidder = Call.caller })
+        Chain.event(Bid(Call.caller, new_bid))
+        true
+
+    /*
+    * @dev - Function for withdrawing the funds
+    */
+    stateful entrypoint withdrawFunds(_tokenId : string) : unit =
+        only_ended_or_canceled(_tokenId)
+        let _bid : bid = state.bids[_tokenId]
+
+        let withdrawal_amount : int =
+            switch(_bid.bid_canceled)
+                true =>
+                    // the auction is cancelled and everyone can withdraw the bidding value they put in
+                    _bid.funds_by_bidder[Call.caller]
+                false =>
+                    abort("WITHDRAW_FUNDS_FAILED. AUCTION NOT YET ENDED.!")
+        
+        // we process the payment
+        transferAmount(_tokenId, Call.caller, withdrawal_amount)
+
+    /*
+    * @dev - Function for changing the auction state to cancelled
+    */
+    stateful entrypoint cancelAuction(_tokenId : string) : bool =
+        only_owner(_tokenId)
+        only_before_end(_tokenId)
+        only_not_canceled(_tokenId)
+        
+        put(state { bids[_tokenId].bid_canceled = true })
+        Chain.event(BidCanceled("Auction cancelled."))
+        true
+
+    payable stateful function transferAmountToContract() : unit =
+        require (Call.value > 0, "Value cannot be Zero!")
+        Chain.spend(Contract.address, Call.value)
+
+    /*
+    * @dev - Internal helper function for withdrawing the funds
+    * @param beneficiary : address - the address to whom to send the funds
+    * @param amount : int - the amount to send
+    */
+    payable stateful function transferAmount(_tokenId : string, beneficiary : address, amount : int) : unit =
+        require (amount > 0, "Cannot withdraw 0.")
+
+        let _bid : bid = state.bids[_tokenId]
+        let _funds_by_bidder : map(address, int) = _bid.funds_by_bidder
+        
+        // put(state { bids[_tokenId] = _bid })
+        put(state { bids[_tokenId].funds_by_bidder[beneficiary] = _funds_by_bidder[beneficiary] - amount })
+        Chain.spend(beneficiary, amount)
+        Chain.event(BidWithdrawal(beneficiary, amount))
+
+    /*
+    * @dev - Internal helper function used as modifier for checking if the auction is still active
+    */
+    function only_running(_tokenId : string) =
+        only_not_canceled(_tokenId)
+        let _bid : bid = state.bids[_tokenId]
+        require((Chain.timestamp > _bid.bid_start_time) && (Chain.timestamp < _bid.bid_end_time), "Auction not active")
+
+    /*
+    * @dev - Internal helper function used as modifier for checking if the caller is the owner
+    */
+    function only_owner(_tokenId : string) =
+        require(checkTokenExists(_tokenId) == true, "Token ID doesn't exists")
+        let _bid : bid = state.bids[_tokenId]
+        require(Call.caller == _bid.bidOwner, "Only the owner is allowed!")
+
+    /*
+    * @dev - Internal helper function used as modifier for checking if the caller is NOT the owner
+    */
+    function only_not_owner(_tokenId : string) =
+        require(checkTokenExists(_tokenId) == true, "Token ID doesn't exists")
+        let _bid : bid = state.bids[_tokenId]
+        require(Call.caller != _bid.bidOwner, "Owner is not allowed!")
+
+    /*
+    * @dev - Internal helper function used as modifier for checking if the call is made after the auction start
+    */
+    function only_after_start(_tokenId : string) =
+        require(checkTokenExists(_tokenId) == true, "Token ID doesn't exists")
+        let _bid : bid = state.bids[_tokenId]
+        require(Chain.timestamp > _bid.bid_start_time, "The auction is not started!")
+
+    /*
+    * @dev - Internal helper function used as modifier for checking if the call is made before the auction end
+    */
+    function only_before_end(_tokenId : string) =
+        require(checkTokenExists(_tokenId) == true, "Token ID doesn't exists")
+        let _bid : bid = state.bids[_tokenId]
+        require(Chain.timestamp < _bid.bid_end_time, "Auction already ended.")
+
+    /*
+    * @dev - Internal helper function used as modifier for checking if the call is made while the auction is not cancelled
+    */
+    function only_not_canceled(_tokenId : string) =
+        require(checkTokenExists(_tokenId) == true, "Token ID doesn't exists")
+        let _bid : bid = state.bids[_tokenId]
+        require(_bid.bid_canceled == false, "Auction is cancelled.")
+
+    /*
+    * @dev - Internal helper function used as modifier for checking if the call is made after the auction is ended or cancelled
+    */
+    function only_ended_or_canceled(_tokenId : string) =
+        require(checkTokenExists(_tokenId) == true, "Token ID doesn't exists")
+        let _bid : bid = state.bids[_tokenId]
+        require((Chain.timestamp > _bid.bid_end_time) || (_bid.bid_canceled == true), "The auction has not ended or been cancelled.")
+
+    // A function to help check the existence of the token created in the bids.
+    function checkTokenExists(_tokenId : string) : bool = 
+        Map.member(_tokenId, state.bids)
+    
+    entrypoint checkBalance(_address : address) : int = 
+        Chain.balance(_address)

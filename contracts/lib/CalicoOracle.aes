@@ -1,0 +1,65 @@
+@compiler >= 6
+
+contract interface OracleConnector =
+    payable entrypoint query : (string, bool) => string
+    entrypoint getAnswerByQueryUniqId : (string) => option(string)
+    entrypoint canCallBack: () => bool
+    entrypoint getBaseFee: () => int
+    entrypoint getNextQueryID: () => string
+
+contract interface OraclesManager =
+    entrypoint getAddress : (string) => address
+    entrypoint setContractOracle : (string) => bool
+    entrypoint getContractOracle : (address) => string
+    entrypoint getListOfOracles : () => list(string)
+
+contract CalicoOracle =
+    record state = {
+        oraclesManagerAddress: address
+    }
+
+    record setup = {
+        oracle_address: OraclesManager,
+        oracle_connector: OracleConnector
+      }
+
+    entrypoint init(oracleConnectorAddress : address) =
+        { oraclesConnectorAddress = oracleConnectorAddress}
+
+    // Must run this to select oracle at init - push this to init function.
+    public entrypoint setOracle(oracle_id: string) : bool =
+        let _oracle_address : OraclesManager = ct_2fkS2UefdAtrD4gmpYcQbujQJU3iaR1B7FPikeZWQ4xUxqbWhu
+        _oracle_address.setContractOracle(oracle_id)
+    
+    public entrypoint getOracleId() : string =
+        let _oracle_address : OraclesManager = ct_2fkS2UefdAtrD4gmpYcQbujQJU3iaR1B7FPikeZWQ4xUxqbWhu
+        _oracle_address.getContractOracle(Call.caller)
+
+    // Get the linked oracle address and oracle manager address
+    public entrypoint set() : setup =
+        let _oracle_address : OraclesManager = ct_2fkS2UefdAtrD4gmpYcQbujQJU3iaR1B7FPikeZWQ4xUxqbWhu
+        let _oracle_connector : OracleConnector = Address.to_contract(_oracle_address.getAddress(getOracleId()))
+        
+        {oracle_address = _oracle_address, oracle_connector = _oracle_connector}
+    
+    // 
+    public entrypoint getOracleAddress() : address =
+        set().oracle_address.getAddress(getOracleId())
+
+    public entrypoint canCallBack() : bool =
+        set().oracle_connector.canCallBack()
+    
+    public entrypoint getBaseFee() : int =
+        set().oracle_connector.getBaseFee()
+
+    public entrypoint getNextQueryID() : string =
+        set().oracle_connector.getNextQueryID()
+
+    public entrypoint getAnswer(query_id: string) : option(string) =
+        set().oracle_connector.getAnswerByQueryUniqId(query_id)
+
+    stateful entrypoint query(args: string, require_callback: bool, value_received: int) : string =
+        set().oracle_connector.query(args, require_callback, value = value_received)
+
+    public entrypoint availableOracles() : list(string) =
+        set().oracle_address.getListOfOracles()
