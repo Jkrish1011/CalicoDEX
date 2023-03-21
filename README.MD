@@ -1,4 +1,4 @@
-#CalicoDEX#
+# CalicoDEX
 
 The Decentralized EXchange is build on aeternity platform.
 The functionalities currently possible for this contract includes:
